@@ -1,4 +1,4 @@
-# 🏴‍☠️ Luffy Panel
+# 🏴‍☠️ Straw Hat | 麦わら帽子 (LUFFY PANEL)
 
 A lightweight VLESS + Trojan proxy panel built with FastAPI, deployable on [Render](https://render.com) or [Railway](https://railway.app).
 
@@ -141,20 +141,19 @@ The **Clean IP** page lets you manage alternative addresses that get appended to
 
 ## 📡 MTProto Proxy
 
-Luffy Panel can also run a Telegram **MTProto proxy**, managed from its own **MTProto** tab in the panel — completely separate from the VLESS/Trojan inbounds.
+Straw Hat | 麦わら帽子 (LUFFY PANEL) can also run a Telegram **MTProto proxy**, managed from its own **MTProto** tab in the panel — completely separate from the VLESS/Trojan inbounds.
 
 - Add as many secrets ("inbounds") as you want, each with its own traffic quota, expiry date, max connections, set of Clean IPs, and **its own internal port**.
 - Each inbound gets a ready `tg://proxy?server=...&port=...&secret=...` link (and QR code).
 - **Sponsor / promoted channel:** register your proxy's IP, port and secret with Telegram's official **@MTProxybot** to have Telegram show your channel to your proxy's users. Paste the tag it gives you into the "Sponsor Tag" field — that's just a reminder field in the panel; the actual ad delivery is handled entirely by Telegram once you've registered.
 
-### Two engines — build with the Dockerfile for the reliable one
+### Engine: built-in Python (this deploy doesn't use Docker)
 
-The proxy is supervised by `mtproto-proxy.py`, spawned automatically by `main.py` on boot. It picks its engine automatically:
+This deploy ships as a plain `Procfile` app (no `Dockerfile`), so `mtproto-proxy.py` — spawned automatically by `main.py` on boot — uses its **built-in Python MTProto engine**, which implements the obfuscated2 handshake from scratch. See the limitations below before relying on it in production.
 
-1. **mtg (recommended)** — the real, battle-tested [mtg](https://github.com/9seconds/mtg) binary. This repo's **`Dockerfile`** builds it in by copying the binary straight out of the official `nineseconds/mtg` image, so if you deploy with Docker (which Railway and Render both do automatically when a `Dockerfile` is present) you get it for free — no extra setup. One `mtg` process runs per active inbound, each on its own internal port.
-2. **Built-in Python engine (fallback)** — only used if the `mtg` binary isn't found (e.g. you deployed without Docker, using just `Procfile`/buildpacks). It implements the MTProto handshake from scratch; see the limitations below.
+> If you ever *do* want the more battle-tested [mtg](https://github.com/9seconds/mtg) engine instead, `mtproto-proxy.py` will use it automatically if it finds an `mtg` binary on `PATH` (or pointed to by the `MTPROXY_BIN` env var) — e.g. if your host image happens to include it. Nothing else changes; this is fully optional and not required for MTProto to work.
 
-> Traffic usage (`used_bytes`) only updates live under the built-in Python engine — `mtg` doesn't expose clean per-secret byte counters. Quota/expiry/active enforcement still works with `mtg` either way (an inbound that goes over quota or expires simply has its `mtg` process stopped); you just won't see the live counter tick up. Use the "Reset"/limit fields to manage it manually if you're on the `mtg` engine.
+> Traffic usage (`used_bytes`) updates live under the built-in Python engine (it would not, if you ever switched to `mtg` — that engine doesn't expose clean per-secret byte counters). Quota/expiry/active enforcement always works either way.
 
 ### TCP Proxy — created automatically via the Railway API
 
@@ -172,10 +171,10 @@ The panel can create that TCP proxy **for you**, with no trip to the Railway das
 
 - **Render:** raw TCP proxying isn't available on standard web services; you'd need a paid "Private Service"/TCP-capable plan, or run `mtproto-proxy.py` on a separate host that does support exposing a TCP port.
 
-### Limitations of the built-in fallback engine (only relevant if you're not using the Dockerfile)
+### Limitations of the built-in MTProto engine (the one this deploy actually uses)
 
 - Supports the **abridged** and **intermediate** client transports (what the vast majority of MTProto clients, including official Telegram apps, use). **Padded-intermediate** and fake-TLS ("dd"-secret / SNI masking) are not implemented — those clients are rejected rather than silently mismatched.
-- The handshake follows the publicly documented MTProto "obfuscated2" scheme used by open-source proxies like MTProxy/mtg/mtprotoproxy, and was verified locally byte-for-byte, but it has **not** been tested against a live Telegram datacenter (this environment has no outbound network access). Test it after you deploy, and open an issue if a client can't connect. This caveat does not apply to the `mtg` engine — it's an established, independently maintained project.
+- The handshake follows the publicly documented MTProto "obfuscated2" scheme used by open-source proxies like MTProxy/mtg/mtprotoproxy, and was verified locally byte-for-byte, but it has **not** been tested against a live Telegram datacenter (this environment has no outbound network access). Test it after you deploy, and open an issue if a client can't connect.
 
 ## 🔧 Fragment Mode (v2rayNG / v2ray)
 
@@ -395,7 +394,7 @@ MIT — use freely, modify as needed.
 ---
 ---
 
-# 🏴‍☠️ لوفی پنل
+# 🏴‍☠️ کلاه حصیری | Straw Hat | 麦わら帽子 (LUFFY PANEL)
 
 یک پنل پراکسی سبک VLESS + Trojan ساخته‌شده با FastAPI، قابل استقرار روی [Render](https://render.com) یا [Railway](https://railway.app).
 
@@ -544,18 +543,13 @@ MIT — use freely, modify as needed.
 - برای هر اینباند یک لینک آماده‌ی `tg://proxy?server=...&port=...&secret=...` (و QR) ساخته می‌شه.
 - **تگ اسپانسر / کانال تبلیغاتی:** آی‌پی، پورت و سکرت پروکسیت رو توی ربات رسمی تلگرام **@MTProxybot** ثبت کن تا تلگرام کانال تو رو به کاربرای پروکسیت نشون بده. تگی که بهت می‌ده رو توی فیلد «تگ اسپانسر» بذار — این فیلد فقط برای یادآوری خودته؛ نمایش تبلیغ کاملاً توسط خودِ تلگرام بعد از ثبت انجام می‌شه.
 
-### دو موتور — با Dockerfile اونی که قابل‌اعتماده رو بگیر
+### موتور: پایتون داخلی (این دیپلوی از Docker استفاده نمی‌کنه)
 
-پروکسی توسط `mtproto-proxy.py` مدیریت می‌شه، که پنل موقع بالا اومدن به‌صورت خودکار اجراش می‌کنه. موتور رو خودش انتخاب می‌کنه:
+این دیپلوی به‌صورت یک اپ ساده‌ی `Procfile` هست (بدون `Dockerfile`)، پس `mtproto-proxy.py` — که خودِ `main.py` موقع بالا اومدن اجراش می‌کنه — از **موتور داخلی پایتون MTProto** استفاده می‌کنه، که هندشیک obfuscated2 رو از صفر پیاده‌سازی کرده. قبل از استفاده‌ی جدی، محدودیت‌هاش رو پایین‌تر بخون.
 
-1. **mtg (توصیه‌شده)** — باینری واقعی و باتجربه‌ی [mtg](https://github.com/9seconds/mtg). فایل **`Dockerfile`** همین پروژه، این باینری رو مستقیم از ایمیج رسمی `nineseconds/mtg` کپی می‌کنه — پس اگه با Docker دیپلوی کنی (که Railway و Render هر دو وقتی `Dockerfile` وجود داشته باشه خودکار انجامش می‌دن)، بدون هیچ کار اضافه‌ای این موتور رو داری. به‌ازای هر اینباند فعال، یک پروسه‌ی `mtg` جدا روی پورت داخلی خودش اجرا می‌شه.
-2. **موتور داخلی پایتون (fallback)** — فقط وقتی استفاده می‌شه که باینری `mtg` پیدا نشه (مثلاً بدون Docker، فقط با `Procfile`/بیلدپک دیپلوی کرده باشی). این موتور هندشیک MTProto رو از صفر پیاده‌سازی می‌کنه؛ محدودیت‌هاش پایین‌تر اومده.
+> اگه یه روزی خواستی از موتور باتجربه‌تر [mtg](https://github.com/9seconds/mtg) استفاده کنی، `mtproto-proxy.py` خودش اگه یک باینری `mtg` روی `PATH` (یا آدرسی که env var به اسم `MTPROXY_BIN` بهش اشاره می‌کنه) پیدا کنه، خودکار ازش استفاده می‌کنه — مثلاً اگه ایمیج هاستت از قبل شاملش باشه. چیز دیگه‌ای عوض نمی‌شه؛ این کاملاً اختیاریه و برای کارکردن MTProto لازم نیست.
 
-> مصرف ترافیک (`used_bytes`) فقط زیر موتور داخلی پایتون به‌صورت زنده آپدیت می‌شه — چون `mtg` شمارنده‌ی بایت مجزا برای هر سکرت رو به‌سادگی در اختیار نمی‌ذاره. اعمال محدودیت/انقضا/فعال‌بودن روی `mtg` هم درست کار می‌کنه (اینباندی که از محدودیت رد بشه یا منقضی بشه، پروسه‌ی `mtg` مربوطه‌ش متوقف می‌شه)؛ فقط شمارنده‌ی زنده رو نمی‌بینی. اگه از موتور `mtg` استفاده می‌کنی، از فیلدهای محدودیت/بازنشانی برای مدیریت دستی استفاده کن.
-
-### TCP Proxy — روی Railway نیمه‌خودکار
-
-**MTProto پروتکل HTTP نیست.** برخلاف کانفیگ‌های VLESS/Trojan که از همون سرور وب پنل رد می‌شن، MTProto نمی‌تونه پورت HTTPS پنل رو به اشتراک بذاره و به‌ازای هر اینباند به یک پورت TCP خام و مجزا نیاز داره:
+> مصرف ترافیک (`used_bytes`) زیر موتور داخلی پایتون به‌صورت زنده آپدیت می‌شه (اگه یه روز رفتی سراغ `mtg`، این دیگه صدق نمی‌کنه چون اون موتور شمارنده‌ی بایت مجزا برای هر سکرت نمی‌ده). اعمال محدودیت/انقضا/فعال‌بودن توی هر دو حالت همیشه درست کار می‌کنه.
 
 ### TCP Proxy — خودکار از طریق API خودِ Railway ساخته می‌شه
 
@@ -573,10 +567,10 @@ MIT — use freely, modify as needed.
 
 - **Render:** روی سرویس‌های وب معمولی، TCP خام پشتیبانی نمی‌شه؛ به یک پلن پولی «Private Service»/دارای قابلیت TCP نیاز داری، یا باید `mtproto-proxy.py` رو روی یک هاست جدا که از پورت TCP پشتیبانی می‌کنه اجرا کنی.
 
-### محدودیت‌های موتور داخلی fallback (فقط وقتی مهمه که از Dockerfile استفاده نکرده باشی)
+### محدودیت‌های موتور داخلی MTProto (همونی که این دیپلوی واقعاً ازش استفاده می‌کنه)
 
 - ترابردهای **abridged** و **intermediate** پشتیبانی می‌شن (چیزی که اکثر قریب‌به‌اتفاق کلاینت‌های MTProto از جمله اپ رسمی تلگرام استفاده می‌کنن). حالت **padded-intermediate** و fake-TLS (سکرت‌های «dd» / پنهان‌سازی SNI) پیاده‌سازی نشدن — این کلاینت‌ها به‌جای رفتار نادرست، مستقیم قطع می‌شن.
-- هندشیک بر اساس مشخصات عمومی و مستندِ «obfuscated2» که در پروکسی‌های متن‌باز مثل MTProxy/mtg/mtprotoproxy استفاده می‌شه پیاده‌سازی شده و به‌صورت بایت‌به‌بایت به‌صورت محلی تست شده، ولی روی یک دیتاسنتر واقعی تلگرام تست **نشده** (این محیط دسترسی به شبکه‌ی خروجی نداره). بعد از دیپلوی حتماً تستش کن و اگه کلاینتی وصل نشد گزارش بده. این محدودیت روی موتور `mtg` صدق نمی‌کنه — چون یک پروژه‌ی مستقل و جاافتاده‌ست.
+- هندشیک بر اساس مشخصات عمومی و مستندِ «obfuscated2» که در پروکسی‌های متن‌باز مثل MTProxy/mtg/mtprotoproxy استفاده می‌شه پیاده‌سازی شده و به‌صورت بایت‌به‌بایت به‌صورت محلی تست شده، ولی روی یک دیتاسنتر واقعی تلگرام تست **نشده** (این محیط دسترسی به شبکه‌ی خروجی نداره). بعد از دیپلوی حتماً تستش کن و اگه کلاینتی وصل نشد گزارش بده.
 
 ## 🔧 فعال‌کردن Fragment Mode (در v2rayNG / v2ray)
 

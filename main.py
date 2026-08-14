@@ -53,7 +53,7 @@ logger.addHandler(q_handler)
 logging.getLogger("uvicorn.error").addHandler(q_handler)
 logging.getLogger("uvicorn.access").addHandler(q_handler)
 
-app = FastAPI(title="Luffy Panel", docs_url=None, redoc_url=None)
+app = FastAPI(title="Straw Hat | 麦わら帽子 (LUFFY PANEL)", docs_url=None, redoc_url=None)
 
 # Bump this on every release so the dashboard can notify already-open sessions
 # that a new version is available / was just applied.
@@ -399,7 +399,7 @@ BOT_I18N = {
         "btn_create": "➕ Create User",
         "btn_addip": "🌐 Add Clean IP",
         "btn_lang": "فارسی",
-        "welcome": "👑 <b>Welcome to Luffy Panel Telegram Bot!</b>\nManage your VLESS inbounds directly from your Telegram.",
+        "welcome": "👑 <b>Welcome to Straw Hat | 麦わら帽子 (LUFFY PANEL) Telegram Bot!</b>\nManage your VLESS inbounds directly from your Telegram.",
         "lang_switched": "🌐 Language switched to <b>English</b>.",
         "stats": (
             "<b>📊 Server Status Dashboard</b>\n\n"
@@ -2632,7 +2632,7 @@ def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Luffy - {link['label']}</title>
+    <title>Straw Hat - {link['label']}</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
         *{{margin:0;padding:0;box-sizing:border-box}}
@@ -3395,7 +3395,7 @@ def generate_clash_config(link: dict, uid: str, addresses: list[str]) -> str:
     proxy_names = "\n".join(f'      - "{p}"' for p in proxy_name_list)
 
     return (
-        f"# Luffy Panel - {link['label']}\n"
+        f"# Straw Hat | 麦わら帽子 (LUFFY PANEL) - {link['label']}\n"
         f"# {usage_str} | {expiry_str}\n"
         f"port: 7890\n"
         f"socks-port: 7891\n"
@@ -3885,7 +3885,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Luffy Panel</title>
+<title>Straw Hat | 麦わら帽子 (LUFFY PANEL)</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=Inter:wght@300;400;500;600;700&family=Vazirmatn:wght@400;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <style>
@@ -3935,8 +3935,10 @@ body[dir="rtl"]{direction:rtl;text-align:right}
   border-bottom:1px solid var(--border);flex-shrink:0}
 .sb-hat{filter:drop-shadow(0 0 10px rgba(255,215,0,.5));transition:filter .3s}
 .sb-hat:hover{filter:drop-shadow(0 0 18px rgba(255,215,0,.9))}
-.sb-title{font-family:'Cinzel',serif;font-size:8px;letter-spacing:.18em;color:rgba(255,215,0,.6);
-  text-transform:uppercase;white-space:nowrap;overflow:hidden}
+.sb-title{font-family:'Cinzel',serif;font-size:8px;letter-spacing:.14em;color:rgba(255,215,0,.6);
+  text-transform:uppercase;text-align:center;line-height:1.5;max-width:64px}
+.sb-title-sub{font-family:'Cinzel',serif;font-size:6.5px;letter-spacing:.08em;color:rgba(255,215,0,.35);
+  text-transform:uppercase;text-align:center;margin-top:1px}
 .sb-nav{flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:12px;
   gap:2px;padding-left:8px;padding-right:8px}
 .nav-item{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
@@ -4119,7 +4121,8 @@ body[dir="rtl"]{direction:rtl;text-align:right}
 .login-box{background:var(--surface2);border:1px solid var(--border2);border-radius:20px;
   padding:36px 32px;width:100%;max-width:360px;box-shadow:var(--gold-glow)}
 .login-logo{text-align:center;margin-bottom:28px}
-.login-title{font-family:'Cinzel',serif;font-size:22px;font-weight:900;color:var(--gold);letter-spacing:.1em}
+.login-title{font-family:'Cinzel',serif;font-size:19px;font-weight:900;color:var(--gold);letter-spacing:.06em;line-height:1.4}
+.login-title-sub{font-family:'Cinzel',serif;font-size:11px;font-weight:700;color:rgba(255,215,0,.55);letter-spacing:.08em;margin-top:2px}
 .login-sub{font-size:11px;color:var(--text3);margin-top:6px}
 
 /* Notification styles */
@@ -4208,7 +4211,8 @@ body[dir="rtl"]{direction:rtl;text-align:right}
           <ellipse cx="42" cy="17" rx="23" ry="5.5" fill="#C8900A" stroke="#FFD700" stroke-width="1"/>
           <path d="M20 45 Q21.5 41.5 42 39.5 Q62.5 41.5 64 45" fill="none" stroke="#CC2200" stroke-width="4.5" stroke-linecap="round" opacity=".92"/>
         </svg>
-        <div class="login-title">LUFFY PANEL</div>
+        <div class="login-title">Straw Hat | 麦わら帽子</div>
+        <div class="login-title-sub">(LUFFY PANEL)</div>
         <div class="login-sub">Enter your password to continue</div>
       </div>
       <div class="fg">
@@ -4241,7 +4245,7 @@ body[dir="rtl"]{direction:rtl;text-align:right}
         </a>
       </div>
     </div>
-    <span style="font-family:'Cinzel',serif;font-size:16px;font-weight:700;color:var(--gold);letter-spacing:2px">LUFFY</span>
+    <span style="font-family:'Cinzel',serif;font-size:13px;font-weight:700;color:var(--gold);letter-spacing:1px;line-height:1.3;text-align:right">Straw Hat | 麦わら帽子<br><span style="font-size:8px;color:rgba(255,215,0,.5);letter-spacing:.5px">(LUFFY PANEL)</span></span>
   </div>
 
   <!-- SIDEBAR -->
@@ -4266,7 +4270,8 @@ body[dir="rtl"]{direction:rtl;text-align:right}
           <ellipse cx="35" cy="24" rx="5" ry="3" fill="rgba(255,255,255,.1)" transform="rotate(-20 35 24)"/>
         </svg>
       </div>
-      <div class="sb-title">LUFFY</div>
+      <div class="sb-title">Straw Hat | 麦わら帽子</div>
+      <div class="sb-title-sub">(LUFFY PANEL)</div>
     </div>
     <nav class="sb-nav">
       <button class="nav-item active" data-page="dashboard">
@@ -4417,7 +4422,7 @@ body[dir="rtl"]{direction:rtl;text-align:right}
       <div class="card" style="padding:12px 16px;margin-bottom:14px;font-size:12px;color:var(--text3);line-height:1.7">
         <span data-en="Base proxy port:" data-fa="پورت پایه‌ی پروکسی:">Base proxy port:</span> <b id="mt-port" style="color:var(--gold)">-</b>
         &nbsp;·&nbsp;
-        <span data-en="Each inbound below gets its own internal port (shown in the table). If you deployed via the included Dockerfile, the proxy engine is the real mtg binary." data-fa="هر اینباند زیر یک پورت داخلی مخصوص خودش داره (توی جدول نشون داده می‌شه). اگه با Dockerfile موجود دیپلوی کرده باشی، موتور پروکسی همون باینری واقعی mtg هست.">Each inbound below gets its own internal port (shown in the table). If you deployed via the included Dockerfile, the proxy engine is the real mtg binary.</span>
+        <span data-en="Each inbound below gets its own internal port (shown in the table). This deploy uses the built-in Python MTProto engine (no Dockerfile needed) — see the README for its supported transports." data-fa="هر اینباند زیر یک پورت داخلی مخصوص خودش داره (توی جدول نشون داده می‌شه). این دیپلوی از موتور داخلی پایتون MTProto استفاده می‌کنه (بدون نیاز به Dockerfile) — ترابردهای پشتیبانی‌شده‌ش توی README نوشته شده.">Each inbound below gets its own internal port (shown in the table). This deploy uses the built-in Python MTProto engine (no Dockerfile needed) — see the README for its supported transports.</span>
       </div>
       <div class="card" style="padding:14px 16px;margin-bottom:14px">
         <div style="font-weight:600;font-size:13px;margin-bottom:4px" data-en="🚂 Railway — Auto TCP Proxy" data-fa="🚂 Railway — ساخت خودکار TCP Proxy">🚂 Railway — Auto TCP Proxy</div>

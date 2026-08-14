@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-mtproto-proxy.py — Luffy Panel MTProto (Telegram) proxy engine
-================================================================
+mtproto-proxy.py — Straw Hat | 麦わら帽子 (LUFFY PANEL) MTProto (Telegram) proxy engine
+======================================================================================
 
 Supervises the actual MTProto (Telegram) proxying for every enabled
 `mtproto_inbounds` row in the panel's SQLite database. It supports two
-engines and picks automatically based on what's available in the image:
+engines and picks automatically based on what's available on the host:
 
-  1. **mtg (preferred)** — if the real `mtg` binary (github.com/9seconds/mtg)
-     is present (it is, when you build from the provided Dockerfile), one
-     `mtg simple-run` child process is supervised per usable inbound, each
-     bound to its own internal port. mtg is a mature, widely-deployed Go
-     implementation of the MTProto proxy protocol — using it instead of a
-     hand-rolled reimplementation is what makes this reliable in practice.
-  2. **Built-in Python engine (fallback)** — used only if `mtg` isn't found
-     (e.g. running outside Docker). Implements the obfuscated2 handshake
-     from scratch and demultiplexes every secret on one shared port. See
-     "Protocol notes" below for its limitations; test it before relying on
-     it in production.
+  1. **mtg (preferred, opportunistic)** — if the real `mtg` binary
+     (github.com/9seconds/mtg) happens to be on `PATH` or pointed to by
+     `MTPROXY_BIN`, one `mtg simple-run` child process is supervised per
+     usable inbound, each bound to its own internal port. mtg is a mature,
+     widely-deployed Go implementation of the MTProto proxy protocol.
+     This deploy doesn't ship a Dockerfile, so `mtg` won't be present
+     unless you installed it yourself on the host — that's fine, the
+     built-in engine below is the expected path for a plain
+     Procfile/buildpack deploy (Railway/Render without Docker).
+  2. **Built-in Python engine (default for this deploy)** — used whenever
+     `mtg` isn't found, i.e. normally. Implements the obfuscated2
+     handshake from scratch and demultiplexes every secret on one shared
+     port. See "Protocol notes" below for its limitations; test it before
+     relying on it in production.
 
 Either way, this file:
   * Tracks quota/expiry/active state per inbound and starts/stops the
@@ -34,8 +37,8 @@ the dashboard's usage counter stays wherever it was last manually set;
 quota/expiry/active enforcement still works either way (an inbound that
 becomes unusable has its proxy process stopped).
 
-Protocol notes / honest limitations of the built-in fallback engine
----------------------------------------------------------------------
+Protocol notes / honest limitations of the built-in engine (the one this deploy actually uses)
+-------------------------------------------------------------------------------------------------
   * Supports the **abridged** and **intermediate** client transports,
     which cover the overwhelming majority of real MTProto-proxy
     clients (including the official Telegram apps).
@@ -54,8 +57,7 @@ Protocol notes / honest limitations of the built-in fallback engine
     open-source MTProto proxy (official MTProxy, mtg, mtprotoproxy,
     etc.). Test it after deploying and report back if a client can't
     connect — the DC IP list or a byte offset is the most likely
-    culprit to revisit. mtg (the preferred engine) does not have this
-    caveat since it's an established, independently maintained project.
+    culprit to revisit.
 
 Sponsor ("proxy ad tag")
 ------------------------
@@ -562,10 +564,10 @@ async def main():
         log.info(f"mtg binary found at {binary} — using it as the MTProto engine (recommended path)")
         await run_with_mtg(binary)
     else:
-        log.warning(
-            "mtg binary not found (this image wasn't built from the provided Dockerfile) — "
-            "falling back to the built-in pure-Python engine. This works but is less battle-tested "
-            "than mtg; building via Dockerfile is recommended for production."
+        log.info(
+            "mtg binary not found on this host (expected for a plain Procfile/buildpack deploy — "
+            "no Dockerfile is used) — using the built-in pure-Python engine. See mtproto-proxy.py's "
+            "module docstring for what it does and doesn't support."
         )
         await run_builtin_engine()
 
