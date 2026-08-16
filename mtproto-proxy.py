@@ -98,7 +98,22 @@ log = logging.getLogger("mtproto-proxy")
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-DB_FILE = os.environ.get("LUFFY_DB_FILE") or ("/data/panel.db" if os.path.isdir("/data") else "panel.db")
+def _writable_dir(path: str) -> bool:
+    """See main.py's identical helper for why this can't just be
+    os.path.isdir(): that alone gives a false positive on hosts (like
+    Android/Pydroid3) where /data exists but isn't actually writable."""
+    if not os.path.isdir(path):
+        return False
+    try:
+        probe = os.path.join(path, f".write_test_{os.getpid()}")
+        with open(probe, "w") as f:
+            f.write("x")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+DB_FILE = os.environ.get("LUFFY_DB_FILE") or ("/data/panel.db" if _writable_dir("/data") else "panel.db")
 MTPROTO_PORT = int(os.environ.get("MTPROTO_PORT", "3456"))
 MTPROTO_BIND = os.environ.get("MTPROTO_BIND", "0.0.0.0")
 RELOAD_INTERVAL = 5          # seconds between re-reading inbounds from DB
@@ -573,14 +588,37 @@ async def main():
 
 
 async def run_builtin_engine():
-    """Fallback engine: one asyncio server on MTPROTO_PORT, demultiplexing
-    every configured secret off the single obfuscated2 handshake — see the
-    module docstring for its tested-but-unverified-against-Telegram status."""
-    server = await asyncio.start_server(handle_client, MTPROTO_BIND, MTPROTO_PORT)
-    addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
-    log.info(f"MTProto proxy (built-in engine) listening on {addrs} — {len(STORE.by_secret)} secret(s) loaded from {DB_FILE}")
-    async with server:
-        await server.serve_forever()
+    """Fallback engine: demultiplexes every configured secret's obfuscated2
+    handshake the same way regardless of which port a connection came in
+    on, but — critically — must actually have a listener open on every
+    port an inbound was assigned, not just MTPROTO_PORT. Each inbound gets
+    its own bind_port (443, 444, 445, ...) from main.py so it can get its
+    own Railway TCP Proxy; if this engine only listened on MTPROTO_PORT,
+    every inbound except the very first would have a tg://proxy link
+    pointing at a port nothing is listening on — connection refused, which
+    is exactly the "proxy doesn't work" symptom this was fixed for.
+    Servers are opened/closed as inbounds are added/removed/reassigned,
+    on the same cadence as the inbound reload loop."""
+    open_servers: dict[int, asyncio.Server] = {}
+
+    async def reconcile():
+        while True:
+            wanted_ports = {ib.bind_port for ib in STORE.by_secret.values()} or {MTPROTO_PORT}
+            for port in wanted_ports - open_servers.keys():
+                try:
+                    server = await asyncio.start_server(handle_client, MTPROTO_BIND, port)
+                    open_servers[port] = server
+                    log.info(f"MTProto proxy (built-in engine) now listening on {MTPROTO_BIND}:{port}")
+                except OSError as e:
+                    log.error(f"could not bind built-in engine to port {port}: {e}")
+            for port in list(open_servers.keys() - wanted_ports):
+                server = open_servers.pop(port)
+                server.close()
+                log.info(f"MTProto proxy (built-in engine) stopped listening on {MTPROTO_BIND}:{port} (no inbound uses it anymore)")
+            await asyncio.sleep(RELOAD_INTERVAL)
+
+    log.info(f"MTProto proxy (built-in engine) starting — {len(STORE.by_secret)} secret(s) loaded from {DB_FILE}")
+    await reconcile()
 
 
 # ── mtg engine (preferred — real, battle-tested MTProto proxy binary) ──────
