@@ -5,22 +5,28 @@ mtproto-proxy.py — Straw Hat | 麦わら帽子 (LUFFY PANEL) MTProto (Telegram
 
 Supervises the actual MTProto (Telegram) proxying for every enabled
 `mtproto_inbounds` row in the panel's SQLite database. It supports two
-engines and picks automatically based on what's available on the host:
+engines and picks automatically based on what's available at runtime:
 
-  1. **mtg (preferred, opportunistic)** — if the real `mtg` binary
-     (github.com/9seconds/mtg) happens to be on `PATH` or pointed to by
-     `MTPROXY_BIN`, one `mtg simple-run` child process is supervised per
-     usable inbound, each bound to its own internal port. mtg is a mature,
-     widely-deployed Go implementation of the MTProto proxy protocol.
-     This deploy doesn't ship a Dockerfile, so `mtg` won't be present
-     unless you installed it yourself on the host — that's fine, the
-     built-in engine below is the expected path for a plain
-     Procfile/buildpack deploy (Railway/Render without Docker).
-  2. **Built-in Python engine (default for this deploy)** — used whenever
-     `mtg` isn't found, i.e. normally. Implements the obfuscated2
-     handshake from scratch and demultiplexes every secret on one shared
-     port. See "Protocol notes" below for its limitations; test it before
-     relying on it in production.
+  1. **mtg (preferred, self-installing — this is what actually runs)** —
+     mtg (github.com/9seconds/mtg) is a mature, widely-deployed Go
+     implementation of the MTProto proxy protocol; using it instead of a
+     hand-rolled reimplementation is what makes this reliable. This deploy
+     has no Dockerfile, so instead of baking mtg into an image at build
+     time, this file downloads the real upstream `mtg` release straight
+     from GitHub the first time it's needed (Railway/Render containers
+     have normal outbound internet access at runtime) and runs it from
+     there — one `mtg simple-run` child process per usable inbound, each
+     bound to its own internal port. If `MTPROXY_BIN` already points at an
+     installed binary, or one is already on `PATH`, that's used instead
+     and nothing is downloaded.
+  2. **Built-in Python engine (last-resort fallback only)** — used only if
+     mtg genuinely can't be obtained (no network reachability to GitHub,
+     or a host architecture no mtg release covers). Implements the
+     obfuscated2 handshake from scratch and is inherently less
+     battle-tested — see "Protocol notes" below. If you're seeing this
+     engine's log lines and connections aren't working, that's the
+     expected symptom; the fix is making sure this container can actually
+     reach github.com, not the panel configuration.
 
 Either way, this file:
   * Tracks quota/expiry/active state per inbound and starts/stops the
@@ -37,8 +43,8 @@ the dashboard's usage counter stays wherever it was last manually set;
 quota/expiry/active enforcement still works either way (an inbound that
 becomes unusable has its proxy process stopped).
 
-Protocol notes / honest limitations of the built-in engine (the one this deploy actually uses)
--------------------------------------------------------------------------------------------------
+Protocol notes / honest limitations of the built-in fallback engine (only relevant if mtg couldn't be installed)
+-------------------------------------------------------------------------------------------------------------------
   * Supports the **abridged** and **intermediate** client transports,
     which cover the overwhelming majority of real MTProto-proxy
     clients (including the official Telegram apps).
@@ -55,9 +61,9 @@ Protocol notes / honest limitations of the built-in engine (the one this deploy 
     tested against live Telegram datacenters. The handshake math
     follows the publicly documented obfuscated2 scheme used by every
     open-source MTProto proxy (official MTProxy, mtg, mtprotoproxy,
-    etc.). Test it after deploying and report back if a client can't
-    connect — the DC IP list or a byte offset is the most likely
-    culprit to revisit.
+    etc.). This caveat does not apply to mtg — it's an established,
+    independently maintained project, which is exactly why it's now the
+    default path whenever it can be downloaded.
 
 Sponsor ("proxy ad tag")
 ------------------------
@@ -77,9 +83,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets as pysecrets
 import sqlite3
 import struct
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -575,14 +583,18 @@ async def main():
     asyncio.create_task(STORE.flush_loop())
 
     binary = find_mtg_binary()
+    if not binary:
+        log.info("mtg binary not found on this host — attempting to download the real upstream binary from GitHub (no Dockerfile needed for this)...")
+        binary = await ensure_mtg_binary()
+
     if binary:
-        log.info(f"mtg binary found at {binary} — using it as the MTProto engine (recommended path)")
+        log.info(f"using mtg at {binary} as the MTProto engine (recommended path)")
         await run_with_mtg(binary)
     else:
-        log.info(
-            "mtg binary not found on this host (expected for a plain Procfile/buildpack deploy — "
-            "no Dockerfile is used) — using the built-in pure-Python engine. See mtproto-proxy.py's "
-            "module docstring for what it does and doesn't support."
+        log.warning(
+            "could not get mtg (no network access to GitHub, or an unsupported host architecture) — "
+            "falling back to the built-in pure-Python engine. See mtproto-proxy.py's module docstring "
+            "for what it does and doesn't support; this is the less battle-tested path."
         )
         await run_builtin_engine()
 
@@ -650,6 +662,149 @@ def find_mtg_binary() -> str:
         if found:
             return found
     return ""
+
+
+# ── Self-installing mtg (no Dockerfile needed) ─────────────────────────────
+# A plain Procfile/buildpack deploy has no step that fetches mtg the way a
+# Dockerfile would, but the container still has normal outbound internet
+# access at runtime (Railway/Render both allow this) — so instead of
+# requiring Docker, this downloads the real mtg release straight from
+# GitHub the first time it's needed and runs it from there. Nothing is
+# hand-rolled here: it's the actual upstream binary, just fetched at
+# startup instead of at image-build time. Every failure mode (no network,
+# GitHub unreachable, unexpected asset layout, binary won't execute) is
+# caught and logged, and falls back to the built-in Python engine — this
+# never blocks startup or crashes the app.
+
+MTG_INSTALL_DIR = os.environ.get("MTG_INSTALL_DIR", "/tmp/luffy-mtg")
+MTG_INSTALL_PATH = os.path.join(MTG_INSTALL_DIR, "mtg")
+MTG_RELEASES_API = "https://api.github.com/repos/9seconds/mtg/releases/latest"
+MTG_DOWNLOAD_TIMEOUT = 30
+
+
+def _mtg_asset_url(release_json: dict) -> tuple[str, str] | None:
+    """Picks the linux/amd64 asset from a GitHub release's asset list.
+    Handles either a raw binary or a .tar.gz/.tgz/.zip archive containing
+    one, since mtg's release layout isn't a stable, versioned API contract
+    to hardcode against.
+
+    Recent mtg releases ship several amd64 variants per platform (plain
+    amd64, and CPU-feature-optimized amd64v2/amd64v3 builds) — picking an
+    optimized one blindly risks "illegal instruction" on older/smaller
+    Railway/Render instances that don't support those extensions. This
+    always prefers the plain, most-compatible build; the run-then-verify
+    check right after download is a second safety net either way."""
+    import platform
+    machine = platform.machine().lower()
+    arch_tokens = ("amd64", "x86_64") if machine in ("x86_64", "amd64") else \
+                  ("arm64", "aarch64") if machine in ("aarch64", "arm64") else (machine,)
+
+    candidates = []
+    for asset in release_json.get("assets", []):
+        name = asset.get("name", "").lower()
+        if "linux" in name and any(tok in name for tok in arch_tokens):
+            candidates.append(asset)
+    if not candidates:
+        return None
+
+    def is_plain_variant(name: str) -> bool:
+        # Reject amd64v2/amd64v3/etc — only the unsuffixed arch name.
+        return not re.search(r"(amd64|x86_64|arm64|aarch64)v\d", name)
+
+    candidates.sort(key=lambda a: 0 if is_plain_variant(a.get("name", "").lower()) else 1)
+    chosen = candidates[0]
+    return chosen["name"], chosen["browser_download_url"]
+
+
+def _mtg_download_and_install_sync() -> str:
+    """Blocking implementation, run off the event loop via asyncio.to_thread.
+    Returns the installed binary's path on success, or "" on any failure."""
+    import urllib.request
+    import urllib.error
+    import tarfile
+    import zipfile
+    import stat
+    import io
+
+    try:
+        os.makedirs(MTG_INSTALL_DIR, exist_ok=True)
+        req = urllib.request.Request(MTG_RELEASES_API, headers={"User-Agent": "luffy-panel"})
+        with urllib.request.urlopen(req, timeout=MTG_DOWNLOAD_TIMEOUT) as resp:
+            release = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        log.warning(f"could not query GitHub for the latest mtg release (no network, or GitHub unreachable): {e}")
+        return ""
+
+    picked = _mtg_asset_url(release)
+    if not picked:
+        log.warning("mtg release found on GitHub, but no linux binary asset matched this host's architecture")
+        return ""
+    asset_name, url = picked
+    tag = release.get("tag_name", "unknown")
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "luffy-panel"})
+        with urllib.request.urlopen(req, timeout=MTG_DOWNLOAD_TIMEOUT) as resp:
+            data = resp.read()
+    except Exception as e:
+        log.warning(f"failed to download mtg {tag} asset {asset_name}: {e}")
+        return ""
+
+    try:
+        lower = asset_name.lower()
+        if lower.endswith((".tar.gz", ".tgz")):
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+                member = next((m for m in tf.getmembers() if m.isfile() and os.path.basename(m.name) == "mtg"), None)
+                if not member:
+                    log.warning(f"mtg {tag} archive {asset_name} didn't contain an 'mtg' binary")
+                    return ""
+                extracted = tf.extractfile(member)
+                with open(MTG_INSTALL_PATH, "wb") as out:
+                    out.write(extracted.read())
+        elif lower.endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                member = next((n for n in zf.namelist() if os.path.basename(n) == "mtg"), None)
+                if not member:
+                    log.warning(f"mtg {tag} archive {asset_name} didn't contain an 'mtg' binary")
+                    return ""
+                with open(MTG_INSTALL_PATH, "wb") as out:
+                    out.write(zf.read(member))
+        else:
+            # raw binary asset
+            with open(MTG_INSTALL_PATH, "wb") as out:
+                out.write(data)
+    except Exception as e:
+        log.warning(f"failed to extract/save mtg {tag} from {asset_name}: {e}")
+        return ""
+
+    try:
+        st = os.stat(MTG_INSTALL_PATH)
+        os.chmod(MTG_INSTALL_PATH, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    except Exception as e:
+        log.warning(f"downloaded mtg but could not make it executable: {e}")
+        return ""
+
+    try:
+        result = subprocess.run([MTG_INSTALL_PATH, "--version"], capture_output=True, timeout=10)
+        if result.returncode not in (0, 1):  # some builds exit 1 on --version but still print it correctly
+            log.warning(f"downloaded mtg {tag} did not run cleanly (exit {result.returncode}): {result.stderr[:200]!r}")
+            return ""
+    except Exception as e:
+        log.warning(f"downloaded mtg {tag} but couldn't execute it ({e}) — likely wrong OS/architecture for this host")
+        return ""
+
+    log.info(f"downloaded and installed mtg {tag} ({asset_name}) to {MTG_INSTALL_PATH}")
+    return MTG_INSTALL_PATH
+
+
+async def ensure_mtg_binary() -> str:
+    if os.path.isfile(MTG_INSTALL_PATH) and os.access(MTG_INSTALL_PATH, os.X_OK):
+        return MTG_INSTALL_PATH
+    try:
+        return await asyncio.to_thread(_mtg_download_and_install_sync)
+    except Exception as e:
+        log.warning(f"unexpected error installing mtg, falling back to the built-in engine: {e}")
+        return ""
 
 
 async def _pump_mtg_output(stream, label: str):
