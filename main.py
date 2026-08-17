@@ -12,6 +12,28 @@ import sqlite3
 import socket
 import subprocess
 import sys
+
+# Makes `from main import ...` (used by xhttp_transport.py) resolve to
+# whatever module is actually running this file, instead of triggering a
+# second, independent execution of main.py from scratch.
+#
+# Under a normal deploy (`uvicorn main:app`), this file is imported as a
+# module literally named "main", so sys.modules['main'] already exists by
+# the time anything does `from main import ...` — this line is then a
+# harmless no-op.
+#
+# But some environments (e.g. Pydroid3 on Android, or any runner that does
+# `exec(open("main.py").read(), __main__.__dict__)`) execute this file
+# as `__main__` directly rather than importing it as "main". In that case
+# sys.modules has no "main" entry yet, so `from main import ...` inside
+# xhttp_transport.py would import a *second*, fresh copy of this file —
+# which reaches the `from xhttp_transport import router` line again while
+# xhttp_transport is still mid-import (it hasn't defined `router` yet),
+# raising "cannot import name 'router' from partially initialized module".
+# Aliasing sys.modules['main'] to whatever's currently running closes that
+# gap for every execution style, not just uvicorn's.
+sys.modules.setdefault("main", sys.modules[__name__])
+
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 from collections import deque, defaultdict
@@ -171,6 +193,25 @@ async def get_notifications(limit: int = 50) -> list:
     finally:
         conn.close()
 
+def _writable_dir(path: str) -> bool:
+    """True only if `path` exists *and* is actually writable by this
+    process. A plain os.path.isdir() check isn't enough: on Railway/Docker
+    a mounted volume at /data is always writable, but on other hosts (most
+    notably Android under Pydroid3) /data exists as a protected system
+    directory that regular apps cannot write to — isdir() alone would give
+    a false positive there, leading straight to PermissionError on every
+    write. This actually attempts a small write-then-delete to be sure."""
+    if not os.path.isdir(path):
+        return False
+    try:
+        probe = os.path.join(path, f".write_test_{os.getpid()}")
+        with open(probe, "w") as f:
+            f.write("x")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
 def _get_or_create_secret() -> str:
     """Returns a stable secret key across restarts.
 
@@ -184,7 +225,7 @@ def _get_or_create_secret() -> str:
     env_secret = os.environ.get("SECRET_KEY")
     if env_secret:
         return env_secret
-    secret_file = "/data/secret.key" if os.path.isdir("/data") else "secret.key"
+    secret_file = "/data/secret.key" if _writable_dir("/data") else "secret.key"
     try:
         if os.path.exists(secret_file):
             with open(secret_file, "r", encoding="utf-8") as f:
@@ -253,7 +294,15 @@ CUSTOM_ADDRESSES_LOCK = asyncio.Lock()
 # would otherwise overwrite the relay process's live usage counters.
 MTPROTO_DB_LOCK = asyncio.Lock()
 MTPROTO_PROXY_PROC = None  # subprocess.Popen handle, set at startup
-MTPROTO_PORT = int(os.environ.get("MTPROTO_PORT", "3456"))
+# One fixed port for every MTProto inbound (the engine natively supports many
+# secrets sharing one port) — simpler than per-inbound ports, and means only
+# one Railway TCP Proxy is ever needed, period.
+MTPROTO_PORT = int(os.environ.get("MTPROTO_PORT", "8000"))
+# Must match mtproto-proxy.py's own default/env var exactly — this is the
+# domain FakeTLS masks the proxy as, and it's baked into the secret every
+# tg://proxy link uses (see _mtproto_secret_param below), so the two
+# processes disagreeing here would silently break every link.
+MTPROTO_TLS_DOMAIN = os.environ.get("MTPROTO_TLS_DOMAIN", "www.google.com").strip() or "www.google.com"
 
 notified_uids = set()
 
@@ -382,8 +431,9 @@ def variants_from_body(body: dict, base: dict | None = None) -> dict:
         result[auth] = cur
     return sanitize_variants(result)
 
-DB_FILE = "/data/panel.db" if os.path.isdir("/data") else "panel.db"
-if os.path.isdir("/data"):
+_data_writable = _writable_dir("/data")
+DB_FILE = "/data/panel.db" if _data_writable else "panel.db"
+if _data_writable:
     logger.warning(f"[STARTUP] Persistent volume detected at /data -> using {DB_FILE} (data survives restarts/deploys)")
 else:
     logger.warning(f"[STARTUP] NO persistent volume found at /data -> using EPHEMERAL {DB_FILE} (ALL links/data will be LOST on next restart/deploy!)")
@@ -916,6 +966,7 @@ def spawn_mtproto_proxy():
     env = dict(os.environ)
     env["LUFFY_DB_FILE"] = DB_FILE
     env["MTPROTO_PORT"] = str(MTPROTO_PORT)
+    env["MTPROTO_TLS_DOMAIN"] = MTPROTO_TLS_DOMAIN
     try:
         MTPROTO_PROXY_PROC = subprocess.Popen([sys.executable, script], env=env)
         logger.info(f"[MTProto] proxy process started (pid {MTPROTO_PROXY_PROC.pid}), listening on port {MTPROTO_PORT}")
@@ -1909,8 +1960,9 @@ async def railway_mtproto_provision(request: Request, _=Depends(require_auth)):
     """The 'Deploy' button in the MTProto tab: takes a token + project the
     operator picked, saves the token, resolves which service/environment in
     that project is this panel, and creates/backfills a Railway TCP Proxy
-    for every MTProto inbound that doesn't have a confirmed public endpoint
-    yet — all in one click, no dashboard trip needed."""
+    for the shared MTPROTO_PORT — every inbound uses the same port, so this
+    is one provisioning call that then gets applied to every inbound still
+    missing a confirmed public endpoint, all in one click."""
     body = await request.json()
     token = (body.get("token") or "").strip()
     project_id = (body.get("project_id") or "").strip()
@@ -1926,18 +1978,19 @@ async def railway_mtproto_provision(request: Request, _=Depends(require_auth)):
     async with MTPROTO_DB_LOCK:
         conn = get_db()
         try:
-            rows = conn.execute("SELECT id, label, bind_port, public_host FROM mtproto_inbounds WHERE bind_port IS NOT NULL").fetchall()
+            rows = conn.execute("SELECT id, label, public_host FROM mtproto_inbounds").fetchall()
         finally:
             conn.close()
+
+    provisioned = await _railway_provision_tcp_proxy(
+        MTPROTO_PORT, token=token, service_id=service["id"], environment_id=environment_id,
+    )
 
     results = []
     for row in rows:
         if row["public_host"]:
             results.append({"id": row["id"], "label": row["label"], "status": "already_set"})
             continue
-        provisioned = await _railway_provision_tcp_proxy(
-            row["bind_port"], token=token, service_id=service["id"], environment_id=environment_id,
-        )
         if provisioned:
             conn = get_db()
             try:
@@ -2021,10 +2074,11 @@ async def _railway_provision_tcp_proxy(port: int, token: str = None, service_id:
     return None
 
 async def _auto_provision_existing_mtproto_proxies():
-    """Runs once at boot: for any existing MTProto inbound that doesn't yet
-    have a confirmed public endpoint, try the automatic Railway TCP proxy
-    creation again (covers the case where a Railway token was added after
-    the inbound was created, or an earlier attempt failed transiently)."""
+    """Runs once at boot: if any MTProto inbound is missing a confirmed
+    public endpoint, try the automatic Railway TCP proxy creation again for
+    the shared MTPROTO_PORT (covers the case where a Railway token was
+    added after inbounds already existed, or an earlier attempt failed
+    transiently) and apply the result to every inbound that needs it."""
     if not get_railway_token():
         return
     await asyncio.sleep(3)  # let startup settle first
@@ -2032,23 +2086,25 @@ async def _auto_provision_existing_mtproto_proxies():
         conn = get_db()
         try:
             rows = conn.execute(
-                "SELECT id, bind_port FROM mtproto_inbounds WHERE (public_host IS NULL OR public_host = '') AND bind_port IS NOT NULL"
+                "SELECT id FROM mtproto_inbounds WHERE public_host IS NULL OR public_host = ''"
             ).fetchall()
         finally:
             conn.close()
-        for row in rows:
-            provisioned = await _railway_provision_tcp_proxy(row["bind_port"])
-            if provisioned:
-                conn = get_db()
-                try:
+        if not rows:
+            return
+        provisioned = await _railway_provision_tcp_proxy(MTPROTO_PORT)
+        if provisioned:
+            conn = get_db()
+            try:
+                for row in rows:
                     conn.execute(
                         "UPDATE mtproto_inbounds SET public_host = ?, public_port = ? WHERE id = ?",
                         (provisioned["domain"], str(provisioned.get("proxy_port") or ""), row["id"]),
                     )
-                    conn.commit()
-                finally:
-                    conn.close()
-                logger.info(f"[MTProto] auto-provisioned TCP proxy for inbound {row['id']} -> {provisioned['domain']}:{provisioned.get('proxy_port')}")
+                conn.commit()
+            finally:
+                conn.close()
+            logger.info(f"[MTProto] auto-provisioned shared TCP proxy -> {provisioned['domain']}:{provisioned.get('proxy_port')} (applied to {len(rows)} inbound(s))")
     except Exception as e:
         logger.info(f"[MTProto] startup auto-provision pass skipped/failed: {e}")
 
@@ -2284,22 +2340,13 @@ async def import_addresses(source: str, _=Depends(require_auth)):
 # Talks to the mtproto_inbounds table directly (see note near MTPROTO_DB_LOCK)
 # so the relay subprocess's live used_bytes counter is never clobbered.
 
-def _mtproto_next_port(conn) -> int:
-    used = {r["bind_port"] for r in conn.execute("SELECT bind_port FROM mtproto_inbounds WHERE bind_port IS NOT NULL").fetchall()}
-    p = MTPROTO_PORT
-    while p in used:
-        p += 1
-    return p
-
-def _mtproto_endpoint(bind_port: int, public_host: str, public_port: str) -> tuple[str, int, bool]:
-    """Resolve (host, port, confirmed) for tg://proxy links.
-    Priority: manual override saved on the inbound > Railway's auto-injected
-    TCP Proxy env vars > an unconfirmed guess (panel domain + internal port)
-    so the UI can tell the operator a TCP proxy still needs to be wired up.
-    Auto-detection only reliably matches the FIRST/primary TCP proxy Railway
-    has for this service — additional inbounds on other ports need either
-    their own TCP proxy + a manual override here, or Railway's dashboard to
-    confirm which port that proxy currently targets."""
+def _mtproto_endpoint(public_host: str, public_port: str) -> tuple[str, int, bool]:
+    """Resolve (host, port, confirmed) for tg://proxy links. Every inbound
+    shares the same fixed MTPROTO_PORT, so this is a single global answer,
+    not a per-inbound one. Priority: manual override > Railway's
+    auto-injected TCP Proxy env vars > an unconfirmed guess (panel domain +
+    the fixed port) so the UI can tell the operator a TCP proxy still
+    needs to be wired up."""
     host = (public_host or "").strip()
     port = (public_port or "").strip()
     if host and port.isdigit():
@@ -2308,25 +2355,35 @@ def _mtproto_endpoint(bind_port: int, public_host: str, public_port: str) -> tup
     rw_port = os.environ.get("RAILWAY_TCP_PROXY_PORT", "").strip()
     if rw_host and rw_port.isdigit():
         return rw_host, int(rw_port), True
-    return get_domain(), bind_port, False
+    return get_domain(), MTPROTO_PORT, False
+
+def _mtproto_secret_param(secret_hex: str) -> str:
+    """The secret value that actually goes in a tg://proxy link. The proxy
+    engine only ever runs in TLS-only mode (see mtproto-proxy.py), so every
+    link must use the "ee" + secret + hex(domain) form — a plain secret
+    would make Telegram clients attempt a handshake flavor the server has
+    disabled, and the connection would just fail silently."""
+    return "ee" + secret_hex + MTPROTO_TLS_DOMAIN.encode().hex()
 
 def _mtproto_row_to_dict(row) -> dict:
     try:
         addrs = json.loads(row["addresses_json"]) if row["addresses_json"] else []
     except Exception:
         addrs = []
-    bind_port = row["bind_port"] or MTPROTO_PORT
-    host, port, confirmed = _mtproto_endpoint(bind_port, row["public_host"], row["public_port"])
+    host, port, confirmed = _mtproto_endpoint(row["public_host"], row["public_port"])
+    secret_param = _mtproto_secret_param(row["secret"])
+    hosts = [host] + [a for a in addrs if a and a != host]
+    links = [f"tg://proxy?server={h}&port={port}&secret={secret_param}" for h in hosts]
     return {
         "id": row["id"], "label": row["label"], "secret": row["secret"],
         "dc_id": row["dc_id"], "limit_bytes": row["limit_bytes"], "used_bytes": row["used_bytes"],
         "max_connections": row["max_connections"], "created_at": row["created_at"],
         "active": bool(row["active"]), "expires_at": row["expires_at"],
         "sponsor_tag": row["sponsor_tag"] or "", "selected_addresses": addrs,
-        "bind_port": bind_port,
+        "bind_port": MTPROTO_PORT,
         "public_host": row["public_host"] or "", "public_port": row["public_port"] or "",
         "endpoint_confirmed": confirmed,
-        "links": [f"tg://proxy?server={host}&port={port}&secret={row['secret']}"],
+        "links": links,
     }
 
 @app.get("/api/mtproto")
@@ -2377,19 +2434,20 @@ async def create_mtproto(request: Request, _=Depends(require_auth)):
             existing = conn.execute("SELECT 1 FROM mtproto_inbounds WHERE secret = ?", (secret,)).fetchone()
             if existing:
                 raise HTTPException(status_code=400, detail="An inbound with this secret already exists")
-            bind_port = _mtproto_next_port(conn)
             conn.execute("""
                 INSERT INTO mtproto_inbounds (id, label, secret, dc_id, limit_bytes, used_bytes, max_connections, created_at, active, expires_at, sponsor_tag, addresses_json, bind_port)
                 VALUES (?, ?, ?, ?, ?, 0, ?, ?, 1, ?, ?, ?, ?)
-            """, (mid, label, secret, dc_id, limit_bytes, max_conn, created_at, expires_at, sponsor_tag, json.dumps(selected_addresses), bind_port))
+            """, (mid, label, secret, dc_id, limit_bytes, max_conn, created_at, expires_at, sponsor_tag, json.dumps(selected_addresses), MTPROTO_PORT))
             conn.commit()
         finally:
             conn.close()
 
-    # Best-effort: try to auto-create the Railway TCP proxy for this
-    # inbound's port right away and save the result, so the operator
-    # doesn't have to touch the Railway dashboard at all if this works.
-    provisioned = await _railway_provision_tcp_proxy(bind_port)
+    # Best-effort: try to auto-create the Railway TCP proxy for the shared
+    # MTProto port right away and save the result, so the operator doesn't
+    # have to touch the Railway dashboard. Every inbound shares one port,
+    # so after the first successful call this just finds and reuses the
+    # same TCP proxy instead of creating a duplicate.
+    provisioned = await _railway_provision_tcp_proxy(MTPROTO_PORT)
     if provisioned:
         async with MTPROTO_DB_LOCK:
             conn = get_db()
@@ -2402,11 +2460,12 @@ async def create_mtproto(request: Request, _=Depends(require_auth)):
             finally:
                 conn.close()
 
-    host, port, confirmed = _mtproto_endpoint(bind_port, provisioned["domain"] if provisioned else "", str(provisioned.get("proxy_port") or "") if provisioned else "")
+    host, port, confirmed = _mtproto_endpoint(provisioned["domain"] if provisioned else "", str(provisioned.get("proxy_port") or "") if provisioned else "")
+    secret_param = _mtproto_secret_param(secret)
     return {
-        "ok": True, "id": mid, "secret": secret, "bind_port": bind_port, "endpoint_confirmed": confirmed,
+        "ok": True, "id": mid, "secret": secret, "bind_port": MTPROTO_PORT, "endpoint_confirmed": confirmed,
         "tcp_proxy_auto_created": bool(provisioned),
-        "links": [f"tg://proxy?server={host}&port={port}&secret={secret}"],
+        "links": [f"tg://proxy?server={host}&port={port}&secret={secret_param}"],
     }
 
 @app.patch("/api/mtproto/{mid}")
@@ -2441,14 +2500,6 @@ async def update_mtproto(mid: str, request: Request, _=Depends(require_auth)):
                 sa = body.get("selected_addresses")
                 sa = [str(a) for a in sa][:200] if isinstance(sa, list) else []
                 updates.append("addresses_json = ?"); params.append(json.dumps(sa))
-            if "public_host" in body:
-                ph = str(body.get("public_host") or "").strip()[:253]
-                updates.append("public_host = ?"); params.append(ph)
-            if "public_port" in body:
-                pp = str(body.get("public_port") or "").strip()
-                if pp and not pp.isdigit():
-                    raise HTTPException(status_code=400, detail="public_port must be a number")
-                updates.append("public_port = ?"); params.append(pp)
             if "days_valid" in body:
                 try:
                     dv = int(body["days_valid"])
@@ -2462,7 +2513,22 @@ async def update_mtproto(mid: str, request: Request, _=Depends(require_auth)):
             if updates:
                 params.append(mid)
                 conn.execute(f"UPDATE mtproto_inbounds SET {', '.join(updates)} WHERE id = ?", params)
-                conn.commit()
+
+            # public_host/public_port are a global override, not a per-row
+            # one — every inbound shares the same MTPROTO_PORT and TCP
+            # proxy, so setting this on any one of them applies to all.
+            if "public_host" in body or "public_port" in body:
+                g_updates, g_params = [], []
+                if "public_host" in body:
+                    g_updates.append("public_host = ?"); g_params.append(str(body.get("public_host") or "").strip()[:253])
+                if "public_port" in body:
+                    pp = str(body.get("public_port") or "").strip()
+                    if pp and not pp.isdigit():
+                        raise HTTPException(status_code=400, detail="public_port must be a number")
+                    g_updates.append("public_port = ?"); g_params.append(pp)
+                conn.execute(f"UPDATE mtproto_inbounds SET {', '.join(g_updates)}", g_params)
+
+            conn.commit()
         finally:
             conn.close()
     return {"ok": True}
@@ -2471,24 +2537,26 @@ async def update_mtproto(mid: str, request: Request, _=Depends(require_auth)):
 async def provision_mtproto_tcp_proxy(mid: str, _=Depends(require_auth)):
     """Manual retry button for auto-creating the Railway TCP proxy — used
     when it didn't happen automatically at creation time (token added
-    later, transient API error, etc.)."""
+    later, transient API error, etc.). Every inbound shares MTPROTO_PORT,
+    so a successful result here is applied to every inbound still missing
+    a confirmed public endpoint, not just the one the button was on."""
     async with MTPROTO_DB_LOCK:
         conn = get_db()
         try:
-            row = conn.execute("SELECT bind_port FROM mtproto_inbounds WHERE id = ?", (mid,)).fetchone()
+            row = conn.execute("SELECT id FROM mtproto_inbounds WHERE id = ?", (mid,)).fetchone()
         finally:
             conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="mtproto inbound not found")
-    provisioned = await _railway_provision_tcp_proxy(row["bind_port"])
+    provisioned = await _railway_provision_tcp_proxy(MTPROTO_PORT)
     if not provisioned:
         raise HTTPException(status_code=502, detail="Could not auto-create a Railway TCP proxy. Set a Railway token — either paste one in Settings, or set the RAILWAY_TOKEN environment variable on this service in Railway's own Variables tab (a Project Token) so this works with zero clicks going forward — and make sure this panel is running as a Railway service. Or just create the TCP proxy manually and paste the host/port into this inbound's Public Host / Public Port fields.")
     async with MTPROTO_DB_LOCK:
         conn = get_db()
         try:
             conn.execute(
-                "UPDATE mtproto_inbounds SET public_host = ?, public_port = ? WHERE id = ?",
-                (provisioned["domain"], str(provisioned.get("proxy_port") or ""), mid),
+                "UPDATE mtproto_inbounds SET public_host = ?, public_port = ? WHERE public_host IS NULL OR public_host = ''",
+                (provisioned["domain"], str(provisioned.get("proxy_port") or "")),
             )
             conn.commit()
         finally:
@@ -4422,7 +4490,7 @@ body[dir="rtl"]{direction:rtl;text-align:right}
       <div class="card" style="padding:12px 16px;margin-bottom:14px;font-size:12px;color:var(--text3);line-height:1.7">
         <span data-en="Base proxy port:" data-fa="پورت پایه‌ی پروکسی:">Base proxy port:</span> <b id="mt-port" style="color:var(--gold)">-</b>
         &nbsp;·&nbsp;
-        <span data-en="Each inbound below gets its own internal port (shown in the table). This deploy uses the built-in Python MTProto engine (no Dockerfile needed) — see the README for its supported transports." data-fa="هر اینباند زیر یک پورت داخلی مخصوص خودش داره (توی جدول نشون داده می‌شه). این دیپلوی از موتور داخلی پایتون MTProto استفاده می‌کنه (بدون نیاز به Dockerfile) — ترابردهای پشتیبانی‌شده‌ش توی README نوشته شده.">Each inbound below gets its own internal port (shown in the table). This deploy uses the built-in Python MTProto engine (no Dockerfile needed) — see the README for its supported transports.</span>
+        <span data-en="Every inbound shares this one fixed port — only one Railway TCP Proxy is ever needed. The engine is the real alexbers/mtprotoproxy, downloaded/run as a single file with no separate config.py; quotas, expiry, and connection limits are enforced natively." data-fa="همه‌ی اینباندها همین یک پورت ثابت رو به‌اشتراک می‌ذارن — فقط یک TCP Proxy روی Railway کافیه. موتور همون پروژه‌ی واقعی alexbers/mtprotoproxy هست که به‌صورت یک فایل و بدون config.py جدا اجرا می‌شه؛ محدودیت حجم، انقضا، و تعداد اتصال همگی به‌صورت داخلی و واقعی اعمال می‌شن.">Every inbound shares this one fixed port — only one Railway TCP Proxy is ever needed. The engine is the real alexbers/mtprotoproxy, downloaded/run as a single file with no separate config.py; quotas, expiry, and connection limits are enforced natively.</span>
       </div>
       <div class="card" style="padding:14px 16px;margin-bottom:14px">
         <div style="font-weight:600;font-size:13px;margin-bottom:4px" data-en="🚂 Railway — Auto TCP Proxy" data-fa="🚂 Railway — ساخت خودکار TCP Proxy">🚂 Railway — Auto TCP Proxy</div>
