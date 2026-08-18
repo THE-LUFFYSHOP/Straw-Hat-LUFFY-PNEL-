@@ -243,7 +243,11 @@ def _get_or_create_secret() -> str:
     return new_secret
 
 CONFIG = {
-    "port": int(os.environ.get("PORT", 8000)),
+    # Only matters for local runs — Railway/Render always inject their own
+    # PORT env var. Deliberately NOT 8000: the MTProto proxy (mtproto-proxy.py)
+    # also defaults to port 8000, and both processes trying to bind the
+    # same port locally is exactly what breaks the proxy silently.
+    "port": int(os.environ.get("PORT", 8001)),
     "secret": _get_or_create_secret(),
     "telegram_token": "",
     "telegram_admin_id": "",
@@ -298,6 +302,23 @@ MTPROTO_PROXY_PROC = None  # subprocess.Popen handle, set at startup
 # secrets sharing one port) — simpler than per-inbound ports, and means only
 # one Railway TCP Proxy is ever needed, period.
 MTPROTO_PORT = int(os.environ.get("MTPROTO_PORT", "8000"))
+if MTPROTO_PORT == CONFIG["port"]:
+    # Both default to 8000 (or someone set MTPROTO_PORT/PORT to the same
+    # value by hand on Railway) — if left alone, the web server grabs the
+    # port first and the MTProto engine's own IPv4 bind then fails and
+    # crash-loops forever, while real MTProto clients trying to connect
+    # land on the HTTP server instead (visible as a flood of "Invalid HTTP
+    # request received" in the logs). Auto-shift the proxy's port instead
+    # of crashing, and say so loudly so it's not a silent surprise.
+    _old_mtproto_port = MTPROTO_PORT
+    MTPROTO_PORT = MTPROTO_PORT + 1 if MTPROTO_PORT < 65535 else MTPROTO_PORT - 1
+    logger.warning(
+        f"[MTProto] MTPROTO_PORT ({_old_mtproto_port}) is the same as the panel's own "
+        f"web port ({CONFIG['port']}) — they can't both bind it. Using {MTPROTO_PORT} for "
+        f"the MTProto proxy instead. If you set PORT and/or MTPROTO_PORT by hand in "
+        f"Railway's Variables, give them different values to control this yourself; "
+        f"otherwise this auto-correction just keeps working across restarts."
+    )
 # Must match mtproto-proxy.py's own default/env var exactly — this is the
 # domain FakeTLS masks the proxy as, and it's baked into the secret every
 # tg://proxy link uses (see _mtproto_secret_param below), so the two
